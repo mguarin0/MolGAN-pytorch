@@ -10,7 +10,9 @@ from datetime import datetime
 class SparseMolecularDataset():
 
     def load(self, filename, subset=1):
-
+        """
+        desc:
+        """
         with open(filename, 'rb') as f:
             self.__dict__.update(pickle.load(f))
 
@@ -26,10 +28,16 @@ class SparseMolecularDataset():
         self.__len = self.train_count + self.validation_count + self.test_count
 
     def save(self, filename):
+        """
+        desc:
+        """
         with open(filename, 'wb') as f:
             pickle.dump(self.__dict__, f)
 
     def generate(self, filename, add_h=False, filters=lambda x: True, size=None, validation=0.1, test=0.1):
+        """
+        desc:
+        """
         self.log('Extracting {}..'.format(filename))
 
         if filename.endswith('.sdf'):
@@ -64,6 +72,9 @@ class SparseMolecularDataset():
         self._generate_train_validation_test(validation, test)
 
     def _generate_encoders_decoders(self):
+        """
+        desc: generate encoder and decoder dictionaries
+        """
         self.log('Creating atoms encoder and decoder..')
         atom_labels = sorted(set([atom.GetAtomicNum() for mol in self.data for atom in mol.GetAtoms()] + [0]))
         self.atom_encoder_m = {l: i for i, l in enumerate(atom_labels)}
@@ -92,6 +103,13 @@ class SparseMolecularDataset():
             self.smiles_num_types - 1))
 
     def _generate_AX(self):
+        """
+        desc: calculate smile representations,
+              atomic number representations,
+              adjacency matrices,
+              feature matricies,
+              degree matricies
+        """
         self.log('Creating features and adjacency matrices..')
 
         data = []
@@ -107,9 +125,10 @@ class SparseMolecularDataset():
         max_length = max(mol.GetNumAtoms() for mol in self.data)
         max_length_s = max(len(Chem.MolToSmiles(mol)) for mol in self.data)
 
+
         for i, mol in enumerate(self.data):
-            A = self._genA(mol, connected=True, max_length=max_length)
-            D = np.count_nonzero(A, -1)
+            A = self._genA(mol, connected=True, max_length=max_length) # adj matrix
+            D = np.count_nonzero(A, -1) # count nonzero cols
             if A is not None:
                 data.append(mol)
                 smiles.append(Chem.MolToSmiles(mol))
@@ -141,7 +160,9 @@ class SparseMolecularDataset():
         self.__len = len(self.data)
 
     def _genA(self, mol, connected=True, max_length=None):
-
+        """
+        desc: generate adjacency matrix
+        """
         max_length = max_length if max_length is not None else mol.GetNumAtoms()
 
         A = np.zeros(shape=(max_length, max_length), dtype=np.int32)
@@ -157,21 +178,25 @@ class SparseMolecularDataset():
         return A if connected and (degree > 0).all() else None
 
     def _genX(self, mol, max_length=None):
-
+        """
+        desc: encode atomic number to specified encoded atom idx and pad to max_length with 0
+        """
         max_length = max_length if max_length is not None else mol.GetNumAtoms()
-
         return np.array([self.atom_encoder_m[atom.GetAtomicNum()] for atom in mol.GetAtoms()] + [0] * (
                     max_length - mol.GetNumAtoms()), dtype=np.int32)
 
     def _genS(self, mol, max_length=None):
-
+        """
+        desc: encode smile string to specified encoded smile atom idx and pad to max_length with E
+        """
         max_length = max_length if max_length is not None else len(Chem.MolToSmiles(mol))
-
         return np.array([self.smiles_encoder_m[c] for c in Chem.MolToSmiles(mol)] + [self.smiles_encoder_m['E']] * (
-                    max_length - len(Chem.MolToSmiles(mol))), dtype=np.int32)
+                    max_length - len(Chem.MolToSmiles(mol))), dtype=np.int32) # encode each atom in smile
 
     def _genF(self, mol, max_length=None):
-
+        """
+        desc: generate feature matrix
+        """
         max_length = max_length if max_length is not None else mol.GetNumAtoms()
 
         features = np.array([[*[a.GetDegree() == i for i in range(5)],
@@ -189,6 +214,9 @@ class SparseMolecularDataset():
         return np.vstack((features, np.zeros((max_length - features.shape[0], features.shape[1]))))
 
     def matrices2mol(self, node_labels, edge_labels, strict=False):
+        """
+        desc:
+        """
         mol = Chem.RWMol()
 
         for node_label in node_labels:
@@ -207,6 +235,9 @@ class SparseMolecularDataset():
         return mol
 
     def seq2mol(self, seq, strict=False):
+        """
+        desc:
+        """
         mol = Chem.MolFromSmiles(''.join([self.smiles_decoder_m[e] for e in seq if e != 0]))
 
         if strict:
@@ -218,7 +249,9 @@ class SparseMolecularDataset():
         return mol
 
     def _generate_train_validation_test(self, validation, test):
-
+        """
+        desc: create train, validation, and test indices
+        """
         self.log('Creating train, validation and test sets..')
 
         validation = int(validation * len(self))
@@ -242,6 +275,9 @@ class SparseMolecularDataset():
             train, validation, test))
 
     def _next_batch(self, counter, count, idx, batch_size):
+        """
+        desc:
+        """
         if batch_size is not None:
             if counter + batch_size >= count:
                 counter = 0
@@ -259,6 +295,9 @@ class SparseMolecularDataset():
         return [counter] + output
 
     def next_train_batch(self, batch_size=None):
+        """
+        desc:
+        """
         out = self._next_batch(counter=self.train_counter, count=self.train_count,
                                idx=self.train_idx, batch_size=batch_size)
         self.train_counter = out[0]
@@ -266,6 +305,9 @@ class SparseMolecularDataset():
         return out[1:]
 
     def next_validation_batch(self, batch_size=None):
+        """
+        desc:
+        """
         out = self._next_batch(counter=self.validation_counter, count=self.validation_count,
                                idx=self.validation_idx, batch_size=batch_size)
         self.validation_counter = out[0]
@@ -273,6 +315,9 @@ class SparseMolecularDataset():
         return out[1:]
 
     def next_test_batch(self, batch_size=None):
+        """
+        desc:
+        """
         out = self._next_batch(counter=self.test_counter, count=self.test_count,
                                idx=self.test_idx, batch_size=batch_size)
         self.test_counter = out[0]

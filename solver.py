@@ -152,6 +152,9 @@ class Solver(object):
     def label2onehot(self, labels, dim):
         """Convert label indices to one-hot vectors."""
         out = torch.zeros(list(labels.size())+[dim]).to(self.device)
+        print(len(out.size())-1)
+        print(labels.unsqueeze(-1).shape)
+        exit(0)
         out.scatter_(len(out.size())-1,labels.unsqueeze(-1),1.)
         return out
 
@@ -243,7 +246,7 @@ class Solver(object):
             # =================================================================================== #
 
             a = torch.from_numpy(a).to(self.device).long()            # Adjacency.
-            x = torch.from_numpy(x).to(self.device).long()            # Nodes.
+            x = torch.from_numpy(x).to(self.device).long()            # Nodes: represented as atomic number
             a_tensor = self.label2onehot(a, self.b_dim)
             x_tensor = self.label2onehot(x, self.m_dim)
             z = torch.from_numpy(z).to(self.device).float()
