@@ -23,6 +23,7 @@ class ResidualBlock(nn.Module):
 class Generator(nn.Module):
     """Generator network."""
     def __init__(self, conv_dims, z_dim, vertexes, edges, nodes, dropout):
+        # [128, 256, 512] 8 9 5 5 0.0
         super(Generator, self).__init__()
 
         self.vertexes = vertexes
@@ -30,6 +31,7 @@ class Generator(nn.Module):
         self.nodes = nodes
 
         layers = []
+        # ffnn transform z_dim
         for c0, c1 in zip([z_dim]+conv_dims[:-1], conv_dims):
             layers.append(nn.Linear(c0, c1))
             layers.append(nn.Tanh())
@@ -41,27 +43,31 @@ class Generator(nn.Module):
         self.dropoout = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        output = self.layers(x)
+        # x [16, 8]
+        output = self.layers(x) # [16, 512]
         edges_logits = self.edges_layer(output)\
-                       .view(-1,self.edges,self.vertexes,self.vertexes)
-        edges_logits = (edges_logits + edges_logits.permute(0,1,3,2))/2
-        edges_logits = self.dropoout(edges_logits.permute(0,2,3,1))
-
-        nodes_logits = self.nodes_layer(output)
-        nodes_logits = self.dropoout(nodes_logits.view(-1,self.vertexes,self.nodes))
-
+                       .view(-1, self.edges, self.vertexes, self.vertexes) # [16, 5, 9, 9]
+        edges_logits = (edges_logits + edges_logits.permute(0,1,3,2))/2 # [16, 5, 9, 9] not sure what this op does
+        edges_logits = self.dropoout(edges_logits.permute(0,2,3,1)) # [16, 9, 9, 5]
+        nodes_logits = self.nodes_layer(output) # [16, 45]
+        nodes_logits = self.dropoout(nodes_logits.view(-1, self.vertexes, self.nodes)) # [16, 9, 5]
+        """
+        edges_logits: defines bonds types [16, 9, 9, 5]
+        nodes_logits: defines atom types [16, 9, 5]
+        """
         return edges_logits, nodes_logits
-
 
 class Discriminator(nn.Module):
     """Discriminator network with PatchGAN."""
     def __init__(self, conv_dim, m_dim, b_dim, dropout):
         super(Discriminator, self).__init__()
+        # [[128, 64], 128, [128, 64]] 5 5 0.0
+        graph_conv_dim, aux_dim, linear_dim = conv_dim # [128, 64] 128 [128, 64]
 
-        graph_conv_dim, aux_dim, linear_dim = conv_dim
+        # TODO
         # discriminator
-        self.gcn_layer = GraphConvolution(m_dim, graph_conv_dim, b_dim, dropout)
-        self.agg_layer = GraphAggregation(graph_conv_dim[-1], aux_dim, b_dim, dropout)
+        self.gcn_layer = GraphConvolution(m_dim, graph_conv_dim, b_dim, dropout) # 5, [128,64], 5
+        self.agg_layer = GraphAggregation(graph_conv_dim[-1], aux_dim, b_dim, dropout) # 128, 64, 5
 
         # multi dense layer
         layers = []
@@ -73,7 +79,7 @@ class Discriminator(nn.Module):
         self.output_layer = nn.Linear(linear_dim[-1], 1)
 
     def forward(self, adj, hidden, node, activatation=None):
-        adj = adj[:,:,:,1:].permute(0,3,1,2)
+        adj = adj[:,:,:,1:].permute(0,3,1,2) # slice and reorder dims
         annotations = torch.cat((hidden, node), -1) if hidden is not None else node
         h = self.gcn_layer(annotations, adj)
         annotations = torch.cat((h, hidden, node) if hidden is not None\

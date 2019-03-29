@@ -152,10 +152,7 @@ class Solver(object):
     def label2onehot(self, labels, dim):
         """Convert label indices to one-hot vectors."""
         out = torch.zeros(list(labels.size())+[dim]).to(self.device)
-        print(len(out.size())-1)
-        print(labels.unsqueeze(-1).shape)
-        exit(0)
-        out.scatter_(len(out.size())-1,labels.unsqueeze(-1),1.)
+        out.scatter_(len(out.size())-1,labels.unsqueeze(-1), 1.)
         return out
 
     def classification_loss(self, logit, target, dataset='CelebA'):
@@ -247,9 +244,9 @@ class Solver(object):
 
             a = torch.from_numpy(a).to(self.device).long()            # Adjacency.
             x = torch.from_numpy(x).to(self.device).long()            # Nodes: represented as atomic number
-            a_tensor = self.label2onehot(a, self.b_dim)
-            x_tensor = self.label2onehot(x, self.m_dim)
-            z = torch.from_numpy(z).to(self.device).float()
+            a_tensor = self.label2onehot(a, self.b_dim) # 16x9x9x5
+            x_tensor = self.label2onehot(x, self.m_dim) # 16x9x5
+            z = torch.from_numpy(z).to(self.device).float() # 16x8
 
             # =================================================================================== #
             #                             2. Train the discriminator                              #
@@ -260,8 +257,8 @@ class Solver(object):
             d_loss_real = - torch.mean(logits_real)
 
             # Compute loss with fake images.
-            edges_logits, nodes_logits = self.G(z)
-            # Postprocess with Gumbel softmax
+            edges_logits, nodes_logits = self.G(z) # understood
+            # Postprocess with Gumbel softmax believe this is where categorical sampling occurs
             (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
             logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
             d_loss_fake = torch.mean(logits_fake)
