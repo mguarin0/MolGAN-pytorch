@@ -35,7 +35,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     # Model configuration.
-    parser.add_argument('--z_dim', type=int, default=8, help='dimension of domain labels')
+    parser.add_argument('--z_dim', type=int, default=32, help='dimension of domain labels')
     parser.add_argument('--g_conv_dim', default=[128,256,512], help='number of conv filters in the first layer of G')
     parser.add_argument('--d_conv_dim', type=int, default=[[128, 64], 128, [128, 64]], help='number of conv filters in the first layer of D')
     parser.add_argument('--g_repeat_num', type=int, default=6, help='number of residual blocks in G')
@@ -71,6 +71,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_save_dir', type=str, default='molgan/models')
     parser.add_argument('--sample_dir', type=str, default='molgan/samples')
     parser.add_argument('--result_dir', type=str, default='molgan/results')
+    parser.add_argument('--summary_dir', type=str, default='molgan/summaries')
 
     # Step size.
     parser.add_argument('--log_step', type=int, default=10)

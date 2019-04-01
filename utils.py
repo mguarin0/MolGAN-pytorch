@@ -130,6 +130,9 @@ class MolecularMetrics(object):
 
     @staticmethod
     def water_octanol_partition_coefficient_scores(mols, norm=False):
+        """
+        @desc: gives us logP 
+        """
         scores = [MolecularMetrics._avoid_sanitization_error(lambda: Crippen.MolLogP(mol)) if mol is not None else None
                   for mol in mols]
         scores = np.array(list(map(lambda x: -3 if x is None else x, scores)))

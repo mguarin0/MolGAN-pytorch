@@ -4,6 +4,8 @@ import time
 import datetime
 
 import torch
+from torch import nn
+from tensorboardX import SummaryWriter
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torchvision.utils import save_image
@@ -12,6 +14,7 @@ from utils import *
 from models import Generator, Discriminator
 from data.sparse_molecular_dataset import SparseMolecularDataset
 
+from sklearn.metrics import average_precision_score
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
@@ -74,6 +77,15 @@ class Solver(object):
         if self.use_tensorboard:
             self.build_tensorboard()
 
+        # class vars
+        self.disc_label = torch.autograd.Variable(torch.FloatTensor(self.batch_size).to(self.device))
+        self.aux_label = torch.autograd.Variable(torch.FloatTensor(self.batch_size).to(self.device))
+
+        self.real_label = 1
+        self.fake_label = 0
+        
+        self.writer = SummaryWriter(config.summary_dir)
+
     def build_model(self):
         """Create a generator and a discriminator."""
         self.G = Generator(self.g_conv_dim, self.z_dim,
@@ -82,17 +94,24 @@ class Solver(object):
                            self.data.atom_num_types,
                            self.dropout)
         self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim, self.dropout)
-        self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim, self.dropout)
 
-        self.g_optimizer = torch.optim.Adam(list(self.G.parameters())+list(self.V.parameters()),
+        """Create optimizers for generator and discriminator"""
+        self.g_optimizer = torch.optim.Adam(list(self.G.parameters()),
                                             self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
+
+        """Define loss functions for generator, discriminator, and aux"""
+        self.disc_loss = nn.BCELoss()
+        self.aux_loss = nn.MSELoss()
+
+        """Print networks"""
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
 
         self.G.to(self.device)
         self.D.to(self.device)
-        self.V.to(self.device)
+        self.disc_loss.to(self.device)
+        self.aux_loss.to(self.device)
 
     def print_network(self, model, name):
         """Print out the network information."""
@@ -108,10 +127,8 @@ class Solver(object):
         print('Loading the trained models from step {}...'.format(resume_iters))
         G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(resume_iters))
         D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(resume_iters))
-        V_path = os.path.join(self.model_save_dir, '{}-V.ckpt'.format(resume_iters))
         self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
         self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
-        self.V.load_state_dict(torch.load(V_path, map_location=lambda storage, loc: storage))
 
     def build_tensorboard(self):
         """Build a tensorboard logger."""
@@ -130,10 +147,12 @@ class Solver(object):
         self.g_optimizer.zero_grad()
         self.d_optimizer.zero_grad()
 
+    """
     def denorm(self, x):
-        """Convert the range from [-1, 1] to [0, 1]."""
+        # Convert the range from [-1, 1] to [0, 1].
         out = (x + 1) / 2
         return out.clamp_(0, 1)
+    """
 
     def gradient_penalty(self, y, x):
         """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
@@ -155,15 +174,12 @@ class Solver(object):
         out.scatter_(len(out.size())-1,labels.unsqueeze(-1), 1.)
         return out
 
-    def classification_loss(self, logit, target, dataset='CelebA'):
-        """Compute binary or softmax cross entropy loss."""
-        if dataset == 'CelebA':
-            return F.binary_cross_entropy_with_logits(logit, target, size_average=False) / logit.size(0)
-        elif dataset == 'RaFD':
-            return F.cross_entropy(logit, target)
-
     def sample_z(self, batch_size):
         return np.random.normal(0, 1, size=(batch_size, self.z_dim))
+
+    def add_logP_to_z(self, z, logP):
+        z[:,0]=logP
+        return z
 
     def postprocess(self, inputs, method, temperature=1.):
 
@@ -194,6 +210,7 @@ class Solver(object):
             if m == 'np':
                 rr *= MolecularMetrics.natural_product_scores(mols, norm=True)
             elif m == 'logp':
+                # TODO use to precompute log p for real training data
                 rr *= MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
             elif m == 'sas':
                 rr *= MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
@@ -236,7 +253,15 @@ class Solver(object):
                 print('[Valid]', '')
             else:
                 mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
+                # generate rand logP aux_label_fake =  TODO must find range of values for logP  
                 z = self.sample_z(self.batch_size)
+            
+            real_logPs = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
+            fake_logPs = np.random.normal(0,1, size=(self.batch_size))
+
+            label_real_disc = self.disc_label.data.resize_(self.batch_size).fill_(self.real_label)
+            label_fake_disc = self.disc_label.data.resize_(self.batch_size).fill_(self.fake_label)
+            z = self.add_logP_to_z(z, fake_logPs)
 
             # =================================================================================== #
             #                             1. Preprocess input data                                #
@@ -246,42 +271,76 @@ class Solver(object):
             x = torch.from_numpy(x).to(self.device).long()            # Nodes: represented as atomic number
             a_tensor = self.label2onehot(a, self.b_dim) # 16x9x9x5
             x_tensor = self.label2onehot(x, self.m_dim) # 16x9x5
-            z = torch.from_numpy(z).to(self.device).float() # 16x8
+            z = torch.from_numpy(z).to(self.device).float() # 16x8 # batchx8
+
+            real_logPs = torch.from_numpy(real_logPs).to(self.device).float()
+            fake_logPs = torch.from_numpy(fake_logPs).to(self.device).float()
 
             # =================================================================================== #
             #                             2. Train the discriminator                              #
             # =================================================================================== #
 
-            # Compute loss with real images.
-            logits_real, features_real = self.D(a_tensor, None, x_tensor)
-            d_loss_real = - torch.mean(logits_real)
+            # TRAIN W/REAL
+            logits_real_disc, logits_real_aux, features_real = self.D(a_tensor, None, x_tensor)
+            disc_loss_real = self.disc_loss(logits_real_disc, label_real_disc)
+            aux_loss_real = self.aux_loss(real_logPs, logits_real_aux)
+            disc_loss_real_all = disc_loss_real + aux_loss_real 
 
-            # Compute loss with fake images.
-            edges_logits, nodes_logits = self.G(z) # understood
+            # TRAIN W/FAKE
+            edges_logits, nodes_logits = self.G(z)
             # Postprocess with Gumbel softmax believe this is where categorical sampling occurs
             (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
-            logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
-            d_loss_fake = torch.mean(logits_fake)
+            logits_fake_disc, logits_fake_aux, features_fake = self.D(edges_hat, None, nodes_hat)
+            disc_loss_fake = self.disc_loss(logits_fake_disc, label_fake_disc)
+            aux_loss_fake = self.aux_loss(fake_logPs, logits_fake_aux)
+            disc_loss_fake_all = disc_loss_fake + aux_loss_fake 
+
+            # Backward and optimize D
+            disc_loss_all = disc_loss_real_all+disc_loss_fake_all 
+            self.reset_grad()
+            disc_loss_all.backward() 
+            self.d_optimizer.step()
+
+            # compute classification accuracy of discriminator
+            if (i+1) % self.log_step == 0:
+                avg_precision = average_precision_score(label_real_disc+label_real_disc,
+                                                        logits_real_aux+logits_fake_aux)
+                self.writer.add_scalar("train_disc_avg_precision_score",
+                                       avg_precision,
+                                       i)
+                self.writer.add_scalar("train_disc_loss",
+                                       disc_loss_all,
+                                       i)
+                self.writer.add_scalar("train_disc_aux_loss_fake",
+                                       torch.mean(aux_loss_fake).numpy(),
+                                       i)
+                self.writer.add_scalar("train_disc_aux_loss_real",
+                                       torch.mean(aux_loss_real).numpy(),
+                                       i)
 
             # Compute loss for gradient penalty.
-            eps = torch.rand(logits_real.size(0),1,1,1).to(self.device)
+            """
+            TODO figure this out with equations
+            eps = torch.rand(logits_real_disc.size(0),1,1,1).to(self.device)
             x_int0 = (eps * a_tensor + (1. - eps) * edges_hat).requires_grad_(True)
             x_int1 = (eps.squeeze(-1) * x_tensor + (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
-            grad0, grad1 = self.D(x_int0, None, x_int1)
-            d_loss_gp = self.gradient_penalty(grad0, x_int0) + self.gradient_penalty(grad1, x_int1)
-
+            #grad0, grad1 = self.D(x_int0, None, x_int1) # TODO ASAP figure out what to do here
+            #d_loss_gp = self.gradient_penalty(grad0, x_int0) + self.gradient_penalty(grad1, x_int1)
+            """
 
             # Backward and optimize.
-            d_loss = d_loss_fake + d_loss_real + self.lambda_gp * d_loss_gp
+            """d_loss = d_loss_fake_disc + d_loss_real_disc + self.lambda_gp * d_loss_gp"""
+            """
+            d_loss = d_loss_fake_disc + d_loss_real_disc + self.lambda_gp
             self.reset_grad()
             d_loss.backward()
             self.d_optimizer.step()
-
+            """
             # Logging.
             loss = {}
-            loss['D/loss_real'] = d_loss_real.item()
-            loss['D/loss_fake'] = d_loss_fake.item()
-            loss['D/loss_gp'] = d_loss_gp.item()
+            loss['D/disc_loss_real_all'] = disc_loss_real_all.item()
+            loss['D/disc_loss_fake_all'] = disc_loss_fake_all.item()
+            loss['D/disc_loss_all'] = disc_loss_all.item()
 
             # =================================================================================== #
             #                               3. Train the generator                                #
@@ -292,13 +351,13 @@ class Solver(object):
                 edges_logits, nodes_logits = self.G(z)
                 # Postprocess with Gumbel softmax
                 (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
-                logits_fake, features_fake = self.D(edges_hat, None, nodes_hat)
-                g_loss_fake = - torch.mean(logits_fake)
+                logits_fake_disc, logits_fake_aux, features_fake = self.D(edges_hat, None, nodes_hat)
+                #g_loss_fake = - torch.mean(logits_fake)
 
-                # Real Reward
-                rewardR = torch.from_numpy(self.reward(mols)).to(self.device)
+                # Real Reward TODO cut this out
+                #rewardR = torch.from_numpy(self.reward(mols)).to(self.device)
                 # Fake Reward
-                (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel')
+                #(edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel')
                 edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
                 mols = [self.data.matrices2mol(n_.data.cpu().numpy(), e_.data.cpu().numpy(), strict=True)
                         for e_, n_ in zip(edges_hard, nodes_hard)]
@@ -363,6 +422,7 @@ class Solver(object):
                 print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
 
 
+    """
     def test(self):
         # Load the trained generator.
         self.restore_model(self.test_iters)
@@ -390,3 +450,4 @@ class Solver(object):
             m0.update(m1)
             for tag, value in m0.items():
                 log += ", {}: {:.4f}".format(tag, value)
+    """

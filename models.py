@@ -64,7 +64,7 @@ class Discriminator(nn.Module):
         # [[128, 64], 128, [128, 64]] 5 5 0.0
         graph_conv_dim, aux_dim, linear_dim = conv_dim # [128, 64] 128 [128, 64]
 
-        # TODO
+        # TODO learn more
         # discriminator
         self.gcn_layer = GraphConvolution(m_dim, graph_conv_dim, b_dim, dropout) # 5, [128,64], 5
         self.agg_layer = GraphAggregation(graph_conv_dim[-1], aux_dim, b_dim, dropout) # 128, 64, 5
@@ -76,7 +76,10 @@ class Discriminator(nn.Module):
             layers.append(nn.Dropout(dropout))
         self.linear_layer = nn.Sequential(*layers)
 
-        self.output_layer = nn.Linear(linear_dim[-1], 1)
+        self.fc_disc = nn.Linear(linear_dim[-1], 1)
+        self.fc_aux = nn.Linear(linear_dim[-1], 1)
+
+        self.out_act_disc = nn.Sigmoid()
 
     def forward(self, adj, hidden, node, activatation=None):
         adj = adj[:,:,:,1:].permute(0,3,1,2) # slice and reorder dims
@@ -84,13 +87,15 @@ class Discriminator(nn.Module):
         h = self.gcn_layer(annotations, adj)
         annotations = torch.cat((h, hidden, node) if hidden is not None\
                                  else (h, node), -1)
-        h = self.agg_layer(annotations, torch.tanh)
-        h = self.linear_layer(h)
+        h = self.agg_layer(annotations, torch.tanh) # 16x128
+        # TODO add aux and rvsf network here
+        h = self.linear_layer(h) # 16x64
 
         # Need to implemente batch discriminator #
         ##########################################
 
-        output = self.output_layer(h)
-        output = activatation(output) if activatation is not None else output
+        disc_output = self.out_act_disc(self.fc_disc(h))
+        aux_output = self.fc_aux(h)
+        disc_output = activatation(disc_output) if activatation is not None else disc_output # 16x1
 
-        return output, h
+        return disc_output, aux_output, h
