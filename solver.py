@@ -2,6 +2,7 @@ import numpy as np
 import os
 import time
 import datetime
+from copy import deepcopy
 
 import torch
 from torch import nn
@@ -21,6 +22,8 @@ class Solver(object):
 
     def __init__(self, config):
         """Initialize configurations."""
+
+        self.verbose = False
 
         # Data loader.
         self.data = SparseMolecularDataset()
@@ -94,22 +97,26 @@ class Solver(object):
                            self.data.atom_num_types,
                            self.dropout)
         self.D = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim, self.dropout)
+        self.V = Discriminator(self.d_conv_dim, self.m_dim, self.b_dim, self.dropout)
 
         """Create optimizers for generator and discriminator"""
-        self.g_optimizer = torch.optim.Adam(list(self.G.parameters()),
+        self.g_optimizer = torch.optim.Adam(list(self.G.parameters())+list(self.V.parameters()),
                                             self.g_lr, [self.beta1, self.beta2])
-        self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
+        self.d_optimizer = torch.optim.Adam(self.D.parameters(),
+                                            self.d_lr, [self.beta1, self.beta2])
 
         """Define loss functions for generator, discriminator, and aux"""
-        self.disc_loss = nn.BCELoss()
-        self.aux_loss = nn.MSELoss()
+        self.disc_loss = nn.BCELoss() # added
+        self.aux_loss = nn.MSELoss() # added
 
         """Print networks"""
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
+        self.print_network(self.V, 'V')
 
         self.G.to(self.device)
         self.D.to(self.device)
+        self.V.to(self.device)
         self.disc_loss.to(self.device)
         self.aux_loss.to(self.device)
 
@@ -127,8 +134,10 @@ class Solver(object):
         print('Loading the trained models from step {}...'.format(resume_iters))
         G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(resume_iters))
         D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(resume_iters))
+        V_path = os.path.join(self.model_save_dir, '{}-V.ckpt'.format(resume_iters))
         self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
         self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
+        self.V.load_state_dict(torch.load(V_path, map_location=lambda storage, loc: storage))
 
     def build_tensorboard(self):
         """Build a tensorboard logger."""
@@ -147,12 +156,10 @@ class Solver(object):
         self.g_optimizer.zero_grad()
         self.d_optimizer.zero_grad()
 
-    """
     def denorm(self, x):
         # Convert the range from [-1, 1] to [0, 1].
         out = (x + 1) / 2
         return out.clamp_(0, 1)
-    """
 
     def gradient_penalty(self, y, x):
         """Compute gradient penalty: (L2_norm(dy/dx) - 1)**2."""
@@ -204,31 +211,37 @@ class Solver(object):
         return [delistify(e) for e in (softmax)]
 
     def reward(self, mols):
+        if self.verbose: 
+            print("def reward: ")
         rr = 1.
-        for m in ('logp,sas,qed,unique' if self.metric == 'all' else self.metric).split(','):
-
+        for m in ('sas,qed,unique' if self.metric == 'all' else self.metric).split(','):
             if m == 'np':
                 rr *= MolecularMetrics.natural_product_scores(mols, norm=True)
-            elif m == 'logp':
-                # TODO use to precompute log p for real training data
-                rr *= MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
             elif m == 'sas':
                 rr *= MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True)
+                if self.verbose:
+                    print("MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True): ")
+                    print(MolecularMetrics.synthetic_accessibility_score_scores(mols, norm=True))
             elif m == 'qed':
                 rr *= MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=True)
+                if self.verbose:
+                    print("MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=True): ")
+                    print(MolecularMetrics.quantitative_estimation_druglikeness_scores(mols, norm=True))
             elif m == 'novelty':
                 rr *= MolecularMetrics.novel_scores(mols, data)
             elif m == 'dc':
                 rr *= MolecularMetrics.drugcandidate_scores(mols, data)
             elif m == 'unique':
                 rr *= MolecularMetrics.unique_scores(mols)
+                if self.verbose:
+                    print("MolecularMetrics.unique_scores(mols): ")
+                    print(MolecularMetrics.unique_scores(mols))
             elif m == 'diversity':
                 rr *= MolecularMetrics.diversity_scores(mols, data)
             elif m == 'validity':
                 rr *= MolecularMetrics.valid_scores(mols)
             else:
                 raise RuntimeError('{} is not defined as a metric'.format(m))
-
         return rr.reshape(-1, 1)
 
     def train(self):
@@ -250,17 +263,19 @@ class Solver(object):
             if (i+1) % self.log_step == 0:
                 mols, _, _, a, x, _, _, _, _ = self.data.next_validation_batch()
                 z = self.sample_z(a.shape[0])
+                real_logPs = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
+                fake_logPs = np.random.normal(0,1, size=a.shape[0])
+                label_real_disc = deepcopy(self.disc_label.data.resize_(a.shape[0]).fill_(self.real_label))
+                label_fake_disc = deepcopy(self.disc_label.data.resize_(a.shape[0]).fill_(self.fake_label))
                 print('[Valid]', '')
             else:
                 mols, _, _, a, x, _, _, _, _ = self.data.next_train_batch(self.batch_size)
-                # generate rand logP aux_label_fake =  TODO must find range of values for logP  
                 z = self.sample_z(self.batch_size)
-            
-            real_logPs = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
-            fake_logPs = np.random.normal(0,1, size=(self.batch_size))
+                real_logPs = MolecularMetrics.water_octanol_partition_coefficient_scores(mols, norm=True)
+                fake_logPs = np.random.normal(0,1, size=(self.batch_size))
+                label_real_disc = deepcopy(self.disc_label.data.resize_(self.batch_size).fill_(self.real_label))
+                label_fake_disc = deepcopy(self.disc_label.data.resize_(self.batch_size).fill_(self.fake_label))
 
-            label_real_disc = self.disc_label.data.resize_(self.batch_size).fill_(self.real_label)
-            label_fake_disc = self.disc_label.data.resize_(self.batch_size).fill_(self.fake_label)
             z = self.add_logP_to_z(z, fake_logPs)
 
             # =================================================================================== #
@@ -285,6 +300,7 @@ class Solver(object):
             disc_loss_real = self.disc_loss(logits_real_disc, label_real_disc)
             aux_loss_real = self.aux_loss(real_logPs, logits_real_aux)
             disc_loss_real_all = disc_loss_real + aux_loss_real 
+            disc_loss_real_all.backward() 
 
             # TRAIN W/FAKE
             edges_logits, nodes_logits = self.G(z)
@@ -294,49 +310,39 @@ class Solver(object):
             disc_loss_fake = self.disc_loss(logits_fake_disc, label_fake_disc)
             aux_loss_fake = self.aux_loss(fake_logPs, logits_fake_aux)
             disc_loss_fake_all = disc_loss_fake + aux_loss_fake 
+            disc_loss_fake_all.backward() 
+
+            # Compute loss for gradient penalty.
+            eps = torch.rand(logits_real_disc.size(0),1,1,1).to(self.device)
+            x_int0 = (eps * a_tensor + (1. - eps) * edges_hat).requires_grad_(True)
+            x_int1 = (eps.squeeze(-1) * x_tensor + (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
+            #grad0, grad1, _ = self.D(x_int0, None, x_int1) # TODO ASAP figure out what to do here
+            grad0, _, grad1 = self.D(x_int0, None, x_int1) # TODO ASAP figure out what to do here
+            d_loss_gp = self.gradient_penalty(grad0, x_int0) + self.gradient_penalty(grad1, x_int1)
 
             # Backward and optimize D
-            disc_loss_all = disc_loss_real_all+disc_loss_fake_all 
+            disc_loss_all = disc_loss_real_all + disc_loss_fake_all + self.lambda_gp * d_loss_gp
             self.reset_grad()
-            disc_loss_all.backward() 
             self.d_optimizer.step()
 
             # compute classification accuracy of discriminator
             if (i+1) % self.log_step == 0:
-                avg_precision = average_precision_score(label_real_disc+label_real_disc,
-                                                        logits_real_aux+logits_fake_aux)
-                self.writer.add_scalar("train_disc_avg_precision_score",
-                                       avg_precision,
-                                       i)
+                """
+                label_disc = label_real_disc+label_fake_disc
+                logPs = real_logPs+fake_logPs
+                logits_aux = logits_real_aux+logits_fake_aux
+                logits_aux = logits_aux.view(logits_aux.shape[0])
+                """
                 self.writer.add_scalar("train_disc_loss",
                                        disc_loss_all,
                                        i)
                 self.writer.add_scalar("train_disc_aux_loss_fake",
-                                       torch.mean(aux_loss_fake).numpy(),
+                                       torch.mean(aux_loss_fake).detach().numpy(),
                                        i)
                 self.writer.add_scalar("train_disc_aux_loss_real",
-                                       torch.mean(aux_loss_real).numpy(),
+                                       torch.mean(aux_loss_real).detach().numpy(),
                                        i)
-
-            # Compute loss for gradient penalty.
-            """
-            TODO figure this out with equations
-            eps = torch.rand(logits_real_disc.size(0),1,1,1).to(self.device)
-            x_int0 = (eps * a_tensor + (1. - eps) * edges_hat).requires_grad_(True)
-            x_int1 = (eps.squeeze(-1) * x_tensor + (1. - eps.squeeze(-1)) * nodes_hat).requires_grad_(True)
-            #grad0, grad1 = self.D(x_int0, None, x_int1) # TODO ASAP figure out what to do here
-            #d_loss_gp = self.gradient_penalty(grad0, x_int0) + self.gradient_penalty(grad1, x_int1)
-            """
-
-            # Backward and optimize.
-            """d_loss = d_loss_fake_disc + d_loss_real_disc + self.lambda_gp * d_loss_gp"""
-            """
-            d_loss = d_loss_fake_disc + d_loss_real_disc + self.lambda_gp
-            self.reset_grad()
-            d_loss.backward()
-            self.d_optimizer.step()
-            """
-            # Logging.
+            # Logging
             loss = {}
             loss['D/disc_loss_real_all'] = disc_loss_real_all.item()
             loss['D/disc_loss_fake_all'] = disc_loss_fake_all.item()
@@ -352,24 +358,29 @@ class Solver(object):
                 # Postprocess with Gumbel softmax
                 (edges_hat, nodes_hat) = self.postprocess((edges_logits, nodes_logits), self.post_method)
                 logits_fake_disc, logits_fake_aux, features_fake = self.D(edges_hat, None, nodes_hat)
-                #g_loss_fake = - torch.mean(logits_fake)
+                g_loss_fake = - torch.mean(logits_fake_disc)
 
                 # Real Reward TODO cut this out
-                #rewardR = torch.from_numpy(self.reward(mols)).to(self.device)
+                if self.verbose: 
+                    print("real reward")
+                rewardR = torch.from_numpy(self.reward(mols)).to(self.device)
                 # Fake Reward
-                #(edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel')
+                if self.verbose: 
+                    print("fake reward")
+                (edges_hard, nodes_hard) = self.postprocess((edges_logits, nodes_logits), 'hard_gumbel')
                 edges_hard, nodes_hard = torch.max(edges_hard, -1)[1], torch.max(nodes_hard, -1)[1]
                 mols = [self.data.matrices2mol(n_.data.cpu().numpy(), e_.data.cpu().numpy(), strict=True)
                         for e_, n_ in zip(edges_hard, nodes_hard)]
                 rewardF = torch.from_numpy(self.reward(mols)).to(self.device)
 
                 # Value loss
-                value_logit_real,_ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
-                value_logit_fake,_ = self.V(edges_hat, None, nodes_hat, torch.sigmoid)
-                g_loss_value = torch.mean((value_logit_real - rewardR) ** 2 + (
-                                           value_logit_fake - rewardF) ** 2)
-                #rl_loss= -value_logit_fake
-                #f_loss = (torch.mean(features_real, 0) - torch.mean(features_fake, 0)) ** 2
+                value_logit_real, _, _ = self.V(a_tensor, None, x_tensor, torch.sigmoid)
+                value_logit_fake, _, _ = self.V(edges_hat, None, nodes_hat, torch.sigmoid)
+                g_loss_value = torch.mean((value_logit_real - rewardR) ** 2 +
+                                          (value_logit_fake - rewardF) ** 2)
+
+                rl_loss = -value_logit_fake
+                f_loss = (torch.mean(features_real, 0) - torch.mean(features_fake, 0)) ** 2
 
                 # Backward and optimize.
                 g_loss = g_loss_fake + g_loss_value
@@ -420,7 +431,6 @@ class Solver(object):
                 d_lr -= (self.d_lr / float(self.num_iters_decay))
                 self.update_lr(g_lr, d_lr)
                 print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
-
 
     """
     def test(self):
